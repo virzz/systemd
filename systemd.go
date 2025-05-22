@@ -20,7 +20,7 @@ type Systemd struct {
 	AppID       string
 }
 
-func NewSystemd(name, desc, version, appID string) *Systemd {
+func New(name, desc, version, appID string) *Systemd {
 	return &Systemd{
 		Name:        name,
 		Description: desc,
