@@ -3,10 +3,8 @@ package systemd
 import (
 	"context"
 	"errors"
-	"fmt"
 	"os"
-	"slices"
-	"strconv"
+	"path/filepath"
 
 	systemd "github.com/coreos/go-systemd/v22/dbus"
 	"go.uber.org/zap"
@@ -18,6 +16,8 @@ type Systemd struct {
 	Description string
 	Version     string
 	AppID       string
+
+	isRoot bool
 }
 
 func New(name, desc, version, appID string) *Systemd {
@@ -35,28 +35,28 @@ func (s *Systemd) WithLogger(logger *zap.Logger) *Systemd {
 	return s
 }
 
-func (s *Systemd) UnitFile(mutli bool) string {
-	if mutli {
-		return "/etc/systemd/system/" + s.Name + "@.service"
+func (s *Systemd) UnitFilePath() string {
+	if s.isRoot {
+		return filepath.Join("/", "etc", "systemd", "system", s.Name+".service")
 	}
-	return "/etc/systemd/system/" + s.Name + ".service"
+	return filepath.Join(os.Getenv("HOME"), ".config", "systemd", "system", s.Name+".service")
 }
 
-func (s *Systemd) Install(multi bool, args ...string) error {
+func (s *Systemd) Install(args ...string) error {
 	s.logger.Info("Install... " + s.Name)
 	execPath, err := os.Executable()
 	if err != nil {
 		return err
 	}
 	var buf []byte
-	buf, err = CreateUnit(multi, s.Name, s.Description, execPath, args...)
+	buf, err = CreateUnit(s.Name, s.Description, execPath, args...)
 	if err != nil {
 		return err
 	}
-	name := s.UnitFile(multi)
-	err = os.WriteFile(name, buf, 0644)
+	path := s.UnitFilePath()
+	err = os.WriteFile(path, buf, 0644)
 	if err != nil {
-		s.logger.Error("Failed to write unit file", zap.String("name", name), zap.Error(err))
+		s.logger.Error("Failed to write unit file", zap.String("path", path), zap.Error(err))
 		return err
 	}
 	ctx := context.Background()
@@ -71,15 +71,16 @@ func (s *Systemd) Install(multi bool, args ...string) error {
 // Remove the service
 func (s *Systemd) Remove() error {
 	s.logger.Info("Removing... " + s.Name)
-	err := s.Stop(true)
+	err := s.Stop()
 	if err != nil {
 		s.logger.Warn(err.Error())
 	}
-	errs := []error{
-		os.Remove("/etc/systemd/system/" + s.Name + ".service"),
-		os.Remove("/etc/systemd/system/" + s.Name + "@.service"),
+	err = s.Disable()
+	if err != nil {
+		s.logger.Warn(err.Error())
 	}
-	if !slices.Contains(errs, nil) {
+	err = os.Remove(s.UnitFilePath())
+	if err != nil {
 		return errors.New("remove failed")
 	}
 	s.logger.Info("Removed " + s.Name)
@@ -87,122 +88,45 @@ func (s *Systemd) Remove() error {
 }
 
 // Start the service
-func (s *Systemd) Start(num int, tags ...string) error {
+func (s *Systemd) Start() error {
 	ctx := context.Background()
 	conn, err := systemd.NewSystemConnectionContext(ctx)
 	if err != nil {
 		return err
 	}
 	recv := make(chan string, 1)
-	if num > 0 {
-		for i := 1; i <= num; i++ {
-			name := s.Name + "@" + strconv.Itoa(i) + ".service"
-			_, err = conn.StartUnitContext(ctx, name, "fail", recv)
-			if err != nil {
-				s.logger.Warn(err.Error())
-				continue
-			}
-			v := <-recv
-			if v == "failed" {
-				s.logger.Error("Started [ " + name + " ] " + v)
-			} else {
-				s.logger.Info("Started [ " + name + " ] " + v)
-			}
-		}
-	} else if len(tags) > 0 {
-		for _, tag := range tags {
-			name := s.Name + "@" + tag + ".service"
-			_, err = conn.StartUnitContext(ctx, name, "fail", recv)
-			if err != nil {
-				s.logger.Warn(err.Error())
-				continue
-			}
-			v := <-recv
-			if v == "failed" {
-				s.logger.Error("Started [ " + name + " ] " + v)
-			} else {
-				s.logger.Info("Started [ " + name + " ] " + v)
-			}
-		}
+	name := s.Name + ".service"
+	_, err = conn.StartUnitContext(ctx, name, "fail", recv)
+	if err != nil {
+		return err
+	}
+	v := <-recv
+	if v == "failed" {
+		s.logger.Error("Started [ " + name + " ] " + v)
 	} else {
-		name := s.Name + ".service"
-		_, err = conn.StartUnitContext(ctx, name, "fail", recv)
-		if err != nil {
-			name = s.Name + "@default.service"
-			_, err = conn.StartUnitContext(ctx, name, "fail", recv)
-			if err != nil {
-				return err
-			}
-		}
-		v := <-recv
-		if v == "failed" {
-			s.logger.Error("Started [ " + name + " ] " + v)
-		} else {
-			s.logger.Info("Started [ " + name + " ] " + v)
-		}
+		s.logger.Info("Started [ " + name + " ] " + v)
 	}
 	return nil
 }
 
 // Stop the service
-func (s *Systemd) Stop(all bool, tags ...string) error {
+func (s *Systemd) Stop() error {
 	ctx := context.Background()
 	conn, err := systemd.NewSystemConnectionContext(ctx)
 	if err != nil {
 		return err
 	}
-	if all {
-		items, err := s.Status(false)
-		if err != nil {
-			return err
-		}
-		recv := make(chan string, 1)
-		for _, item := range items {
-			_, err = conn.StopUnitContext(ctx, item.Name, "fail", recv)
-			if err != nil {
-				s.logger.Warn(err.Error())
-				continue
-			}
-			v := <-recv
-			if v == "failed" {
-				s.logger.Error("Stop [ " + item.Name + "] " + v)
-			} else {
-				s.logger.Info("Stop [ " + item.Name + " ] " + v)
-			}
-		}
-	} else if len(tags) > 0 {
-		recv := make(chan string, 1)
-		for _, tag := range tags {
-			name := s.Name + "@" + tag + ".service"
-			_, err = conn.StopUnitContext(ctx, name, "fail", recv)
-			if err != nil {
-				s.logger.Warn(err.Error())
-				continue
-			}
-			v := <-recv
-			if v == "failed" {
-				s.logger.Error("Stop [" + name + "] " + v)
-			} else {
-				s.logger.Info("Stop [ " + name + " ] " + v)
-			}
-		}
+	recv := make(chan string, 1)
+	name := s.Name + ".service"
+	_, err = conn.StopUnitContext(ctx, name, "fail", recv)
+	if err != nil {
+		return err
+	}
+	v := <-recv
+	if v == "failed" {
+		s.logger.Error("Stop [" + name + "] " + v)
 	} else {
-		recv := make(chan string, 1)
-		name := s.Name + ".service"
-		_, err = conn.StopUnitContext(ctx, name, "fail", recv)
-		if err != nil {
-			name = s.Name + "@default.service"
-			_, err = conn.StopUnitContext(ctx, name, "fail", recv)
-			if err != nil {
-				return err
-			}
-		}
-		v := <-recv
-		if v == "failed" {
-			s.logger.Error("Stop [" + name + "] " + v)
-		} else {
-			s.logger.Info("Stop [ " + name + " ] " + v)
-		}
+		s.logger.Info("Stop [ " + name + " ] " + v)
 	}
 	return nil
 }
@@ -213,28 +137,10 @@ func fileExists(name string) bool {
 }
 
 // Enable the service
-func (s *Systemd) Enable(tags ...string) (err error) {
-	var target string
-	origin := "/etc/systemd/system/" + s.Name + "@.service"
+func (s *Systemd) Enable() (err error) {
+	origin := s.UnitFilePath()
 	if fileExists(origin) {
-		target = "/etc/systemd/system/multi-user.target.wants/%s@%s.service"
-		if len(tags) == 0 {
-			tags = []string{"default"}
-		}
-		for _, tag := range tags {
-			_target := fmt.Sprintf(target, s.Name, tag)
-			err = os.Symlink(origin, _target)
-			if err != nil {
-				s.logger.Error("Failed to create symlink", zap.String("origin", origin), zap.String("target", _target), zap.Error(err))
-			} else {
-				s.logger.Info("Created symlink", zap.String("target", _target), zap.String("origin", origin))
-			}
-		}
-		return nil
-	}
-	origin = "/etc/systemd/system/" + s.Name + ".service"
-	if fileExists(origin) {
-		target := "/etc/systemd/system/multi-user.target.wants/" + s.Name + ".service"
+		target := filepath.Join("/", "etc", "systemd", "system", "multi-user.target.wants", s.Name+".service")
 		err = os.Symlink(origin, target)
 		if err != nil {
 			s.logger.Error("Failed to create symlink", zap.String("origin", origin), zap.String("target", target), zap.Error(err))
@@ -247,22 +153,9 @@ func (s *Systemd) Enable(tags ...string) (err error) {
 }
 
 // Disable the service
-func (s *Systemd) Disable(tags ...string) (err error) {
-	target := "/etc/systemd/system/multi-user.target.wants/%s@%s.service"
-	if len(tags) > 0 {
-		for _, tag := range tags {
-			err = os.Remove(fmt.Sprintf(target, s.Name, tag))
-			if err != nil {
-				s.logger.Error("Failed to remove symlink", zap.String("target", target), zap.Error(err))
-			}
-		}
-		return nil
-	}
-	err = os.Remove("/etc/systemd/system/multi-user.target.wants/" + s.Name + "@default.service")
-	if err != nil {
-		s.logger.Warn("Failed to remove symlink", zap.String("target", target), zap.Error(err))
-	}
-	err = os.Remove("/etc/systemd/system/multi-user.target.wants/" + s.Name + ".service")
+func (s *Systemd) Disable() (err error) {
+	target := filepath.Join("/", "etc", "systemd", "system", "multi-user.target.wants", s.Name+".service")
+	err = os.Remove(target)
 	if err != nil {
 		s.logger.Warn("Failed to remove symlink", zap.String("target", target), zap.Error(err))
 	}
@@ -270,152 +163,57 @@ func (s *Systemd) Disable(tags ...string) (err error) {
 }
 
 // Kill the service
-func (s *Systemd) Kill(all bool, tags ...string) error {
+func (s *Systemd) Kill() error {
 	ctx := context.Background()
 	conn, err := systemd.NewSystemConnectionContext(ctx)
 	if err != nil {
 		return err
 	}
-	if all {
-		items, err := s.Status(false)
-		if err != nil {
-			return err
-		}
-		for _, item := range items {
-			conn.KillUnitContext(ctx, item.Name, 9)
-		}
-	} else if len(tags) > 0 {
-		for _, tag := range tags {
-			conn.KillUnitContext(ctx, s.Name+"@"+tag+".service", 9)
-		}
-	} else {
-		conn.KillUnitContext(ctx, s.Name+"default.service", 9)
-		conn.KillUnitContext(ctx, s.Name+"@default.service", 9)
-	}
+	conn.KillUnitWithTarget(ctx, s.Name+".service", systemd.All, 9)
 	return nil
 }
 
 // Restart the service
-func (s *Systemd) Restart(all bool, tags ...string) error {
+func (s *Systemd) Restart() error {
 	ctx := context.Background()
 	conn, err := systemd.NewSystemConnectionContext(ctx)
 	if err != nil {
 		return err
 	}
-	if all {
-		items, err := s.Status(false)
-		if err != nil {
-			return err
-		}
-		recv := make(chan string, 1)
-		for _, item := range items {
-			_, err = conn.RestartUnitContext(ctx, item.Name, "fail", recv)
-			if err != nil {
-				s.logger.Warn(err.Error())
-				continue
-			}
-			v := <-recv
-			if v == "failed" {
-				s.logger.Error("Restarted [ " + item.Name + "] " + v)
-			} else {
-				s.logger.Info("Restarted [ " + item.Name + " ] " + v)
-			}
-		}
-	} else if len(tags) > 0 {
-		recv := make(chan string, 1)
-		for _, tag := range tags {
-			name := s.Name + "@" + tag + ".service"
-			_, err = conn.RestartUnitContext(ctx, name, "fail", recv)
-			if err != nil {
-				s.logger.Warn(err.Error())
-				continue
-			}
-			v := <-recv
-			if v == "failed" {
-				s.logger.Error("Restarted [ " + name + " ] " + v)
-			} else {
-				s.logger.Info("Restarted [ " + name + " ] " + v)
-			}
-		}
+	recv := make(chan string, 1)
+	name := s.Name + ".service"
+	_, err = conn.RestartUnitContext(ctx, name, "fail", recv)
+	if err != nil {
+		return err
+	}
+	v := <-recv
+	if v == "failed" {
+		s.logger.Error("Restarted [ " + name + " ] " + v)
 	} else {
-		recv := make(chan string, 1)
-		name := s.Name + ".service"
-		_, err = conn.RestartUnitContext(ctx, name, "fail", recv)
-		if err != nil {
-			name = s.Name + "@default.service"
-			_, err = conn.RestartUnitContext(ctx, name, "fail", recv)
-			if err != nil {
-				return err
-			}
-		}
-		v := <-recv
-		if v == "failed" {
-			s.logger.Error("Restarted [ " + name + " ] " + v)
-		} else {
-			s.logger.Info("Restarted [ " + name + " ] " + v)
-		}
+		s.logger.Info("Restarted [ " + name + " ] " + v)
 	}
 	return nil
 }
 
 // Reload the service
-func (s *Systemd) Reload(all bool, tags ...string) error {
+func (s *Systemd) Reload() error {
 	s.logger.Info("Reloading... " + s.Name)
 	ctx := context.Background()
 	conn, err := systemd.NewSystemConnectionContext(ctx)
 	if err != nil {
 		return err
 	}
-	if all {
-		items, err := s.Status(false)
-		if err != nil {
-			return err
-		}
-		recv := make(chan string, 1)
-		for _, item := range items {
-			_, err = conn.ReloadOrRestartUnitContext(ctx, item.Name, "fail", recv)
-			if err != nil {
-				return err
-			}
-			v := <-recv
-			if v == "failed" {
-				s.logger.Error("Reloaded [ " + item.Name + "] " + v)
-			} else {
-				s.logger.Info("Reloaded [ " + item.Name + " ] " + v)
-			}
-		}
-	} else if len(tags) > 0 {
-		recv := make(chan string, 1)
-		for _, tag := range tags {
-			name := s.Name + "@" + tag + ".service"
-			_, err = conn.ReloadOrRestartUnitContext(ctx, name, "fail", recv)
-			if err != nil {
-				s.logger.Warn(err.Error())
-			}
-			v := <-recv
-			if v == "failed" {
-				s.logger.Error("Reloaded [ " + name + " ] " + v)
-			} else {
-				s.logger.Info("Reloaded [ " + name + " ] " + v)
-			}
-		}
+	recv := make(chan string, 1)
+	name := s.Name + ".service"
+	_, err = conn.ReloadOrRestartUnitContext(ctx, name, "fail", recv)
+	if err != nil {
+		return err
+	}
+	v := <-recv
+	if v == "failed" {
+		s.logger.Error("Reloaded [ " + name + " ] " + v)
 	} else {
-		recv := make(chan string, 1)
-		name := s.Name + ".service"
-		_, err = conn.ReloadOrRestartUnitContext(ctx, name, "fail", recv)
-		if err != nil {
-			name = s.Name + "@default.service"
-			_, err = conn.ReloadOrRestartUnitContext(ctx, name, "fail", recv)
-			if err != nil {
-				return err
-			}
-		}
-		v := <-recv
-		if v == "failed" {
-			s.logger.Error("Reloaded [ " + name + " ] " + v)
-		} else {
-			s.logger.Info("Reloaded [ " + name + " ] " + v)
-		}
+		s.logger.Info("Reloaded [ " + name + " ] " + v)
 	}
 	return nil
 }

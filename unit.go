@@ -20,7 +20,6 @@ var unitConfig = map[string]map[string]string{
 		"Wants": "network.target",
 	},
 	"Install": {
-		// "DefaultInstance": "default",
 		"WantedBy": "multi-user.target",
 	},
 	"Service": {
@@ -34,18 +33,12 @@ var unitConfig = map[string]map[string]string{
 	},
 }
 
-func CreateUnit(multi bool, binName, desc, path string, args ...string) ([]byte, error) {
+func CreateUnit(binName, desc, path string, args ...string) ([]byte, error) {
 	if unitConfig == nil {
 		return nil, fmt.Errorf("unitConfig is nil")
 	}
 	if _, ok := unitConfig["Install"]; !ok {
 		unitConfig["Install"] = make(map[string]string)
-	}
-	if multi {
-		unitConfig["Install"]["DefaultInstance"] = "default"
-		binName += "@%i"
-	} else {
-		delete(unitConfig["Install"], "DefaultInstance")
 	}
 	if _, ok := unitConfig["Unit"]; !ok {
 		unitConfig["Unit"] = make(map[string]string)
@@ -66,11 +59,7 @@ func CreateUnit(multi bool, binName, desc, path string, args ...string) ([]byte,
 		unitConfig["Service"]["ExecStartPre"] = "/bin/rm -f /run/" + binName + ".pid"
 	}
 	if _, ok := unitConfig["Service"]["ExecStart"]; !ok {
-		if multi {
-			unitConfig["Service"]["ExecStart"] = path + " --instance %i " + strings.Join(args, " ")
-		} else {
-			unitConfig["Service"]["ExecStart"] = path + " " + strings.Join(args, " ")
-		}
+		unitConfig["Service"]["ExecStart"] = path + " " + strings.Join(args, " ")
 	}
 	if _, ok := unitConfig["Service"]["ExecStartPost"]; !ok {
 		unitConfig["Service"]["ExecStartPost"] = "/bin/bash -c '/bin/systemctl show -p MainPID --value " + binName + " > /run/" + binName + ".pid'"

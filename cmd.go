@@ -1,7 +1,6 @@
 package systemd
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -15,10 +14,8 @@ func (s *Systemd) Command(rootCmd *cobra.Command) {
 		if err != nil {
 			return err
 		}
-		if _user.Gid == "0" || _user.Uid == "0" {
-			return nil
-		}
-		return errors.New("root privileges required")
+		s.isRoot = _user.Gid == "0" || _user.Uid == "0"
+		return nil
 	}
 
 	var installCmd = &cobra.Command{
@@ -28,8 +25,7 @@ func (s *Systemd) Command(rootCmd *cobra.Command) {
 		Aliases:           []string{"i"},
 		PersistentPreRunE: persistentPreRunE,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			multi, _ := cmd.Flags().GetBool("multi")
-			return s.Install(multi, args...)
+			return s.Install()
 		},
 	}
 
@@ -50,8 +46,7 @@ func (s *Systemd) Command(rootCmd *cobra.Command) {
 		Aliases:           []string{"run"},
 		PersistentPreRunE: persistentPreRunE,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			num, _ := cmd.Flags().GetInt("num")
-			return s.Start(num, args...)
+			return s.Start()
 		},
 	}
 
@@ -61,8 +56,7 @@ func (s *Systemd) Command(rootCmd *cobra.Command) {
 		Short:             "Systemd Stop",
 		PersistentPreRunE: persistentPreRunE,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			all, _ := cmd.Flags().GetBool("all")
-			return s.Stop(all, args...)
+			return s.Stop()
 		},
 	}
 	var enableCmd = &cobra.Command{
@@ -71,7 +65,7 @@ func (s *Systemd) Command(rootCmd *cobra.Command) {
 		Short:             "Systemd Enable",
 		PersistentPreRunE: persistentPreRunE,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return s.Enable(args...)
+			return s.Enable()
 		},
 	}
 
@@ -81,7 +75,7 @@ func (s *Systemd) Command(rootCmd *cobra.Command) {
 		Short:             "Systemd Disable",
 		PersistentPreRunE: persistentPreRunE,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return s.Disable(args...)
+			return s.Disable()
 		},
 	}
 
@@ -92,8 +86,7 @@ func (s *Systemd) Command(rootCmd *cobra.Command) {
 		Aliases:           []string{"r", "re"},
 		PersistentPreRunE: persistentPreRunE,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			all, _ := cmd.Flags().GetBool("all")
-			return s.Restart(all, args...)
+			return s.Restart()
 		},
 	}
 
@@ -104,8 +97,7 @@ func (s *Systemd) Command(rootCmd *cobra.Command) {
 		Aliases:           []string{"k"},
 		PersistentPreRunE: persistentPreRunE,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			all, _ := cmd.Flags().GetBool("all")
-			return s.Kill(all, args...)
+			return s.Kill()
 		},
 	}
 
@@ -115,8 +107,7 @@ func (s *Systemd) Command(rootCmd *cobra.Command) {
 		Short:             "Systemd Reload",
 		PersistentPreRunE: persistentPreRunE,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			all, _ := cmd.Flags().GetBool("all")
-			return s.Reload(all, args...)
+			return s.Reload()
 		},
 	}
 
@@ -139,20 +130,19 @@ func (s *Systemd) Command(rootCmd *cobra.Command) {
 		Short:             "print systemd unit service file",
 		PersistentPreRunE: persistentPreRunE,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			multi, _ := cmd.Flags().GetBool("multi")
 			if t, _ := cmd.Flags().GetBool("template"); t {
 				execPath, err := os.Executable()
 				if err != nil {
 					return err
 				}
-				buf, err := CreateUnit(multi, s.Name, s.Description, execPath, args...)
+				buf, err := CreateUnit(s.Name, s.Description, execPath)
 				if err != nil {
 					return err
 				}
 				fmt.Println(string(buf))
 				return nil
 			}
-			fn := s.UnitFile(multi)
+			fn := s.UnitFilePath()
 			s.logger.Info("filepath = " + fn)
 			buf, err := os.ReadFile(fn)
 			if err != nil {
@@ -170,12 +160,5 @@ func (s *Systemd) Command(rootCmd *cobra.Command) {
 		startCmd, stopCmd, killCmd, restartCmd, statusCmd,
 		enableCmd, disableCmd,
 	)
-	installCmd.Flags().BoolP("multi", "m", false, "Use template unit service")
-	startCmd.Flags().IntP("num", "n", 0, "Num of Instances for start")
-	stopCmd.Flags().BoolP("all", "a", false, "Stop all Instances")
-	restartCmd.Flags().BoolP("all", "a", false, "Restart all Instances")
-	killCmd.Flags().BoolP("all", "a", false, "Kill all Instances")
-	reloadCmd.Flags().BoolP("all", "a", false, "Reload all Instances")
 	unitCmd.Flags().BoolP("template", "t", false, "Show template unit service file")
-	unitCmd.Flags().BoolP("multi", "m", false, "Use template unit service")
 }
